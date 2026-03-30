@@ -5,8 +5,9 @@
 // the request reaches the tool.
 //
 // Routes:
-//   GET /call/{tool-name}  → forwards to http://{tool-name}.{TOOL_NS}.svc.cluster.local:8080/
-//   GET /healthz           → health check
+//
+//	GET /call/{tool-name}  → forwards to http://{tool-name}.{TOOL_NS}.svc.cluster.local:8080/
+//	GET /healthz           → health check
 package main
 
 import (
@@ -81,15 +82,32 @@ func handleCall(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// tool_response_raw must be valid JSON for encoding. Envoy/plain-text errors are not JSON;
+	// wrapping avoids Encode failure and empty responses to clients.
+	var toolRaw json.RawMessage
+	if json.Valid(body) {
+		toolRaw = json.RawMessage(body)
+	} else {
+		wrapped, err := json.Marshal(map[string]string{"non_json_body": string(body)})
+		if err != nil {
+			toolRaw = json.RawMessage(`{"non_json_body":""}`)
+		} else {
+			toolRaw = wrapped
+		}
+	}
+
 	result := map[string]any{
 		"agent_action":      "called " + name,
 		"tool_url":          toolURL,
 		"tool_status":       resp.StatusCode,
-		"tool_response_raw": json.RawMessage(body),
+		"tool_response_raw": toolRaw,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+	if err := json.NewEncoder(w).Encode(result); err != nil {
+		log.Printf("encode /call/%s response: %v", name, err)
+		http.Error(w, `{"error":"internal encoding error"}`, http.StatusInternalServerError)
+	}
 }
 
 func handleHealthz(w http.ResponseWriter, _ *http.Request) {

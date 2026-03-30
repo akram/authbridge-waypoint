@@ -1,23 +1,26 @@
-# OpenShift S2I (Go) builds for authbridge-waypoint commands in namespace agent-ns.
+# OpenShift S2I (Go) builds — resources live in kagenti-images, not agent-ns.
+#
+# Why: agent-ns is often labeled istio.io/dataplane-mode=ambient. Build pods in that namespace
+# are captured by ztunnel; pushes to image-registry.openshift-image-registry.svc frequently
+# fail (DNS/connect timeouts) while the same BuildConfigs in kagenti-images work.
 #
 # Prerequisites:
-#   - Namespace agent-ns exists.
-#   - ImageStream go-toolset (below) imports registry.access.redhat.com/ubi9/go-toolset:latest.
-#     OpenShift requires ImageChange triggers to reference ImageStreamTag, not DockerImage directly.
-#   - After apply, import the tag if needed: oc import-image go-toolset:latest --from=registry.access.redhat.com/ubi9/go-toolset:latest --confirm -n agent-ns
+#   - Namespace kagenti-images exists (builds + output ImageStreams + go-toolset IST).
+#   - Apply image-puller-bindings.yaml so agent-ns / tool-ns / kagenti-system SAs can pull.
+#   - import-image if needed:
+#     oc import-image go-toolset:latest --from=registry.access.redhat.com/ubi9/go-toolset:latest --confirm -n kagenti-images
 #
-# UBI go-toolset's default S2I assemble expects .go files at the repo root; this project keeps
-# mains under cmd/. Repository .s2i/bin/assemble runs module-mode go build using GO_BUILD_PATH.
+# Workload images (OpenShift): set each Deployment to
+#   image-registry.openshift-image-registry.svc:5000/kagenti-images/<name>:latest
+# Kind/local flows in deploy/08-workloads.yaml keep using localhost:5000 via Makefile.
 #
-# Push .s2i/ to your Git remote before building, or OpenShift will clone source without it.
-#
-# Adjust spec.source.git if you build from a fork.
+# Adjust spec.source.git if you use another fork.
 ---
 apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: go-toolset
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app.kubernetes.io/component: s2i-builder
 spec:
@@ -35,7 +38,7 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: demo-agent
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: demo-agent
 spec: {}
@@ -44,7 +47,7 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: echo-tool
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: echo-tool
 spec: {}
@@ -53,7 +56,7 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: time-tool
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: time-tool
 spec: {}
@@ -62,7 +65,7 @@ apiVersion: image.openshift.io/v1
 kind: ImageStream
 metadata:
   name: token-exchange-service
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: token-exchange-service
 spec: {}
@@ -71,7 +74,7 @@ apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: demo-agent
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: demo-agent
 spec:
@@ -86,7 +89,7 @@ spec:
       from:
         kind: ImageStreamTag
         name: go-toolset:latest
-        namespace: agent-ns
+        namespace: kagenti-images
       env:
         - name: GO_BUILD_PATH
           value: ./cmd/demo-agent
@@ -103,13 +106,13 @@ spec:
         from:
           kind: ImageStreamTag
           name: go-toolset:latest
-          namespace: agent-ns
+          namespace: kagenti-images
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: echo-tool
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: echo-tool
 spec:
@@ -124,7 +127,7 @@ spec:
       from:
         kind: ImageStreamTag
         name: go-toolset:latest
-        namespace: agent-ns
+        namespace: kagenti-images
       env:
         - name: GO_BUILD_PATH
           value: ./cmd/echo-tool
@@ -141,13 +144,13 @@ spec:
         from:
           kind: ImageStreamTag
           name: go-toolset:latest
-          namespace: agent-ns
+          namespace: kagenti-images
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: time-tool
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: time-tool
 spec:
@@ -162,7 +165,7 @@ spec:
       from:
         kind: ImageStreamTag
         name: go-toolset:latest
-        namespace: agent-ns
+        namespace: kagenti-images
       env:
         - name: GO_BUILD_PATH
           value: ./cmd/time-tool
@@ -179,13 +182,13 @@ spec:
         from:
           kind: ImageStreamTag
           name: go-toolset:latest
-          namespace: agent-ns
+          namespace: kagenti-images
 ---
 apiVersion: build.openshift.io/v1
 kind: BuildConfig
 metadata:
   name: token-exchange-service
-  namespace: agent-ns
+  namespace: kagenti-images
   labels:
     app: token-exchange-service
 spec:
@@ -200,7 +203,7 @@ spec:
       from:
         kind: ImageStreamTag
         name: go-toolset:latest
-        namespace: agent-ns
+        namespace: kagenti-images
       env:
         - name: GO_BUILD_PATH
           value: ./cmd/token-exchange-service
@@ -217,4 +220,4 @@ spec:
         from:
           kind: ImageStreamTag
           name: go-toolset:latest
-          namespace: agent-ns
+          namespace: kagenti-images

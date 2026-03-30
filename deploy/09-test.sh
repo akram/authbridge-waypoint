@@ -31,11 +31,18 @@
 #   3. Valid token → time-tool: same waypoint exchanges → aud=time-tool
 #   4. Full E2E via HTTP_PROXY (no ambient mesh): user → agent → tool, proxy exchanges
 #
+# Optional env:
+#   KC_URL — Keycloak base URL for token fetch (default http://localhost:18080 + port-forward).
+#            On ROSA: export KC_URL=https://keycloak-…openshiftapps.com
+#
 set -euo pipefail
 
 KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 REALM="kagenti"
+# Keycloak base URL for token endpoint (HTTPS route on ROSA, or http://localhost:18080 with port-forward).
+KC_URL="${KC_URL:-http://localhost:18080}"
+KC_TOKEN_URL="${KC_URL%/}/realms/${REALM}/protocol/openid-connect/token"
 AGENT_TOOL_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/echo-tool"
 AGENT_TIME_URL="http://demo-agent.agent-ns.svc.cluster.local:8080/call/time-tool"
 INVALID_TOKEN="invalid-token-12345"
@@ -85,33 +92,45 @@ print_token_info() {
   detail "  exp: $exp_human"
 }
 
-# Run a curl command against demo-agent inside agent-ns via a short-lived pod.
-# Usage: run_curl <pod-name> <auth-header-value> [url] → sets CURL_BODY
+# Run curl from a short-lived pod. Args: pod_name auth_header url [namespace]
+# Sets CURL_BODY and CURL_HTTP_CODE (from curl -w, last line of logs).
 run_curl() {
   local pod_name="$1"
   local auth_value="$2"
   local url="${3:-$AGENT_TOOL_URL}"
+  local ns="${4:-agent-ns}"
 
-  kubectl delete pod -n agent-ns "$pod_name" --force --grace-period=0 2>/dev/null || true
+  kubectl delete pod -n "$ns" "$pod_name" --force --grace-period=0 2>/dev/null || true
 
-  kubectl run "$pod_name" -n agent-ns \
+  kubectl run "$pod_name" -n "$ns" \
     --image=curlimages/curl:latest \
     --restart=Never \
-    --command -- sh -c \
-    "curl -s -H 'Authorization: ${auth_value}' '${url}'" \
-    2>/dev/null
+    -- curl -sS --max-time 60 \
+    -H "Authorization: ${auth_value}" \
+    -w $'\n%{http_code}' \
+    "$url" 2>/dev/null
 
-  kubectl wait --for=condition=ready "pod/$pod_name" -n agent-ns --timeout=30s 2>/dev/null || true
-  sleep 5
+  kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$pod_name" -n "$ns" --timeout=120s 2>/dev/null \
+    || kubectl wait --for=jsonpath='{.status.phase}'=Failed "pod/$pod_name" -n "$ns" --timeout=15s 2>/dev/null \
+    || true
+  sleep 1
 
-  CURL_BODY=$(kubectl logs -n agent-ns "$pod_name" 2>&1) || true
-  kubectl delete pod -n agent-ns "$pod_name" --force --grace-period=0 2>/dev/null || true
+  local CURL_RAW
+  CURL_RAW=$(kubectl logs -n "$ns" "$pod_name" 2>&1) || true
+  CURL_HTTP_CODE=$(echo "$CURL_RAW" | tail -n1)
+  CURL_BODY=$(echo "$CURL_RAW" | sed '$d')
+  if ! [[ "$CURL_HTTP_CODE" =~ ^[0-9]{3}$ ]]; then
+    CURL_BODY=$CURL_RAW
+    CURL_HTTP_CODE=""
+  fi
+
+  kubectl delete pod -n "$ns" "$pod_name" --force --grace-period=0 2>/dev/null || true
 }
 
 PROXY_TEST_NS="proxy-test-ns"
 
 cleanup() {
-  [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null || true
+  [[ -n "${PF_PID:-}" ]] && kill "$PF_PID" 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-invalid --force --grace-period=0 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-valid --force --grace-period=0 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-time --force --grace-period=0 2>/dev/null || true
@@ -145,13 +164,19 @@ run_curl "curl-invalid" "Bearer $INVALID_TOKEN"
 TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
 if [[ -z "$TOOL_STATUS" ]]; then
-  # No tool_status means the request never reached demo-agent.
-  # This happens when the agent-waypoint rejects the token on inbound.
+  # No tool_status: inbound waypoint may have rejected (non-JSON body) or demo-agent JSON missing .tool_status
   WAYPOINT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null)
   if [[ -n "$WAYPOINT_ERROR" ]] && echo "$WAYPOINT_ERROR" | grep -qi "invalid token\|malformed\|unauthorized\|audience"; then
     detail "Rejected by agent-waypoint (inbound): $WAYPOINT_ERROR"
     ok "Invalid token rejected by agent-waypoint before reaching demo-agent"
+  elif [[ "$CURL_HTTP_CODE" == "401" || "$CURL_HTTP_CODE" == "403" ]]; then
+    detail "HTTP $CURL_HTTP_CODE from mesh (Envoy often returns plain text, not JSON)"
+    ok "Invalid token rejected (HTTP $CURL_HTTP_CODE)"
+  elif [[ -n "$CURL_BODY" ]] && echo "$CURL_BODY" | grep -qiE "jwt|unauthorized|denied|invalid|malformed|not valid"; then
+    detail "Plain-text / non-JSON rejection body (typical for Istio ext_authz)"
+    ok "Invalid token rejected (message in response body)"
   else
+    detail "HTTP code: ${CURL_HTTP_CODE:-unknown}"
     detail "Response: $CURL_BODY"
     fail "Unexpected response (no tool_status, no recognized error)"
   fi
@@ -177,14 +202,21 @@ info "Test 2: Valid token is exchanged and accepted"
 
 # Obtain a user token from Keycloak (out-of-band, aud=demo-agent)
 detail "Obtaining user token from Keycloak..."
-# Kill any stale port-forward on 18080 (e.g. left over from make up)
-{ lsof -ti tcp:18080 | xargs kill; } 2>/dev/null || true
-sleep 1
-kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" 18080:8080 &
-PF_PID=$!
-sleep 3
+detail "KC_TOKEN_URL=$KC_TOKEN_URL"
 
-KC_TOKEN_URL="http://localhost:18080/realms/$REALM/protocol/openid-connect/token"
+PF_PID=""
+if [[ "$KC_URL" == http://localhost:* || "$KC_URL" == http://127.0.0.1:* ]]; then
+  { lsof -ti tcp:18080 | xargs kill; } 2>/dev/null || true
+  sleep 1
+  kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" 18080:8080 &
+  PF_PID=$!
+  sleep 3
+  # Align token URL with port-forward when using default localhost base
+  if [[ "$KC_URL" == "http://localhost:18080" ]]; then
+    KC_TOKEN_URL="http://localhost:18080/realms/${REALM}/protocol/openid-connect/token"
+  fi
+fi
+
 USER_TOKEN=$(curl -sf -X POST "$KC_TOKEN_URL" \
   -d "grant_type=client_credentials" \
   -d "client_id=demo-agent" \
@@ -212,7 +244,8 @@ run_curl "curl-valid" "Bearer $USER_TOKEN"
 TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
 if [[ "$TOOL_STATUS" != "200" ]]; then
-  fail "Expected tool_status 200, got $TOOL_STATUS"
+  fail "Expected tool_status 200, got ${TOOL_STATUS:-<empty>}"
+  detail "HTTP code (client): ${CURL_HTTP_CODE:-n/a}"
   detail "Response: $CURL_BODY"
   detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service"
 else
@@ -265,7 +298,8 @@ run_curl "curl-time" "Bearer $USER_TOKEN" "$AGENT_TIME_URL"
 TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
 if [[ "$TOOL_STATUS" != "200" ]]; then
-  fail "Expected tool_status 200, got $TOOL_STATUS"
+  fail "Expected tool_status 200, got ${TOOL_STATUS:-<empty>}"
+  detail "HTTP code (client): ${CURL_HTTP_CODE:-n/a}"
   detail "Response: $CURL_BODY"
   detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service"
 else
@@ -401,19 +435,7 @@ echo ""
 
 # Call agent → agent calls tool via HTTP_PROXY → proxy exchanges token
 PROXY_AGENT_URL="http://demo-agent.$PROXY_TEST_NS.svc.cluster.local:8080/call/echo-tool"
-kubectl delete pod -n "$PROXY_TEST_NS" curl-proxy --force --grace-period=0 2>/dev/null || true
-
-kubectl run curl-proxy -n "$PROXY_TEST_NS" \
-  --image=curlimages/curl:latest \
-  --restart=Never \
-  --command -- sh -c \
-  "curl -s -H 'Authorization: Bearer ${USER_TOKEN}' '${PROXY_AGENT_URL}'" \
-  2>/dev/null
-
-kubectl wait --for=condition=ready "pod/curl-proxy" -n "$PROXY_TEST_NS" --timeout=30s 2>/dev/null || true
-sleep 5
-
-CURL_BODY=$(kubectl logs -n "$PROXY_TEST_NS" curl-proxy 2>&1) || true
+run_curl "curl-proxy" "Bearer ${USER_TOKEN}" "$PROXY_AGENT_URL" "$PROXY_TEST_NS"
 
 TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
 
