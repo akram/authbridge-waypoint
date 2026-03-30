@@ -1,4 +1,4 @@
-bin/
+/bin/
 /demo-agent
 /echo-tool
 /time-tool

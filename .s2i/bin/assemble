@@ -1,0 +1,15 @@
+#!/bin/bash
+# S2I assemble for this monorepo: go.mod at root, main packages under cmd/.
+# Set GO_BUILD_PATH in the BuildConfig (e.g. ./cmd/demo-agent). Optional:
+# GOBINARY_OUTPUT (default /opt/app-root/gobinary) must match the image run script.
+set -euo pipefail
+
+: "${GO_BUILD_PATH:?GO_BUILD_PATH must be set (e.g. ./cmd/time-tool)}"
+
+cd /tmp/src
+
+export CGO_ENABLED="${CGO_ENABLED:-0}"
+OUT="${GOBINARY_OUTPUT:-/opt/app-root/gobinary}"
+mkdir -p "$(dirname "${OUT}")"
+
+go build -buildvcs=false -trimpath -o "${OUT}" "${GO_BUILD_PATH}"

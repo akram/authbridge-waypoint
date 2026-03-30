@@ -1,0 +1,220 @@
+# OpenShift S2I (Go) builds for authbridge-waypoint commands in namespace agent-ns.
+#
+# Prerequisites:
+#   - Namespace agent-ns exists.
+#   - ImageStream go-toolset (below) imports registry.access.redhat.com/ubi9/go-toolset:latest.
+#     OpenShift requires ImageChange triggers to reference ImageStreamTag, not DockerImage directly.
+#   - After apply, import the tag if needed: oc import-image go-toolset:latest --from=registry.access.redhat.com/ubi9/go-toolset:latest --confirm -n agent-ns
+#
+# UBI go-toolset's default S2I assemble expects .go files at the repo root; this project keeps
+# mains under cmd/. Repository .s2i/bin/assemble runs module-mode go build using GO_BUILD_PATH.
+#
+# Push .s2i/ to your Git remote before building, or OpenShift will clone source without it.
+#
+# Adjust spec.source.git if you build from a fork.
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: go-toolset
+  namespace: agent-ns
+  labels:
+    app.kubernetes.io/component: s2i-builder
+spec:
+  lookupPolicy:
+    type: Local
+  tags:
+    - name: latest
+      from:
+        kind: DockerImage
+        name: registry.access.redhat.com/ubi9/go-toolset:latest
+      referencePolicy:
+        type: Local
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: demo-agent
+  namespace: agent-ns
+  labels:
+    app: demo-agent
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: echo-tool
+  namespace: agent-ns
+  labels:
+    app: echo-tool
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: time-tool
+  namespace: agent-ns
+  labels:
+    app: time-tool
+spec: {}
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: token-exchange-service
+  namespace: agent-ns
+  labels:
+    app: token-exchange-service
+spec: {}
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: demo-agent
+  namespace: agent-ns
+  labels:
+    app: demo-agent
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/akram/authbridge-waypoint.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        name: go-toolset:latest
+        namespace: agent-ns
+      env:
+        - name: GO_BUILD_PATH
+          value: ./cmd/demo-agent
+        - name: CGO_ENABLED
+          value: "0"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: demo-agent:latest
+  triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChange:
+        from:
+          kind: ImageStreamTag
+          name: go-toolset:latest
+          namespace: agent-ns
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: echo-tool
+  namespace: agent-ns
+  labels:
+    app: echo-tool
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/akram/authbridge-waypoint.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        name: go-toolset:latest
+        namespace: agent-ns
+      env:
+        - name: GO_BUILD_PATH
+          value: ./cmd/echo-tool
+        - name: CGO_ENABLED
+          value: "0"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: echo-tool:latest
+  triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChange:
+        from:
+          kind: ImageStreamTag
+          name: go-toolset:latest
+          namespace: agent-ns
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: time-tool
+  namespace: agent-ns
+  labels:
+    app: time-tool
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/akram/authbridge-waypoint.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        name: go-toolset:latest
+        namespace: agent-ns
+      env:
+        - name: GO_BUILD_PATH
+          value: ./cmd/time-tool
+        - name: CGO_ENABLED
+          value: "0"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: time-tool:latest
+  triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChange:
+        from:
+          kind: ImageStreamTag
+          name: go-toolset:latest
+          namespace: agent-ns
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: token-exchange-service
+  namespace: agent-ns
+  labels:
+    app: token-exchange-service
+spec:
+  source:
+    type: Git
+    git:
+      uri: https://github.com/akram/authbridge-waypoint.git
+      ref: main
+  strategy:
+    type: Source
+    sourceStrategy:
+      from:
+        kind: ImageStreamTag
+        name: go-toolset:latest
+        namespace: agent-ns
+      env:
+        - name: GO_BUILD_PATH
+          value: ./cmd/token-exchange-service
+        - name: CGO_ENABLED
+          value: "0"
+  output:
+    to:
+      kind: ImageStreamTag
+      name: token-exchange-service:latest
+  triggers:
+    - type: ConfigChange
+    - type: ImageChange
+      imageChange:
+        from:
+          kind: ImageStreamTag
+          name: go-toolset:latest
+          namespace: agent-ns
