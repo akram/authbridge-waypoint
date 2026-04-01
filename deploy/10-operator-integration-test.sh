@@ -214,8 +214,8 @@ retry_kubectl kubectl label ns "$TEAM2_NS" \
 
 detail "Namespaces created with ambient mesh labels"
 
-# Create authbridge-config and keycloak-admin-secret for both namespaces
-info "Creating authbridge-config and keycloak-admin-secret in team namespaces..."
+# Create authbridge-config, keycloak-admin-secret, and sidecar ConfigMaps for both namespaces
+info "Creating configuration for operator and webhook-injected sidecars..."
 
 for NS in "$TEAM1_NS" "$TEAM2_NS"; do
   retry_kubectl kubectl create configmap authbridge-config -n "$NS" \
@@ -230,6 +230,29 @@ for NS in "$TEAM1_NS" "$TEAM2_NS"; do
   retry_kubectl kubectl create secret generic keycloak-admin-secret -n "$NS" \
     --from-literal=KEYCLOAK_ADMIN_USERNAME=temp-admin \
     --from-literal=KEYCLOAK_ADMIN_PASSWORD=95e0c65a71dd427c8eb828462ba9d22e \
+    --dry-run=client -o yaml | kubectl apply -f - || true
+
+  sleep 2
+
+  # Create spiffe-helper-config ConfigMap (required by spiffe-helper sidecar)
+  retry_kubectl kubectl create configmap spiffe-helper-config -n "$NS" \
+    --from-literal=helper.conf='agent_address = "/spiffe-workload-api/spire-agent.sock"
+cmd = ""
+cmd_args = ""
+cert_dir = "/opt"
+renew_signal = ""
+svid_file_name = "svid.pem"
+svid_key_file_name = "svid_key.pem"
+svid_bundle_file_name = "svid_bundle.pem"
+jwt_svids = [{jwt_audience="kagenti", jwt_svid_file_name="jwt_svid.token"}]' \
+    --dry-run=client -o yaml | kubectl apply -f - || true
+
+  sleep 2
+
+  # Create envoy-config ConfigMap (required by envoy-proxy sidecar)
+  # Using minimal configuration file for this test
+  retry_kubectl kubectl create configmap envoy-config -n "$NS" \
+    --from-file=envoy.yaml=deploy/minimal-envoy-config.yaml \
     --dry-run=client -o yaml | kubectl apply -f - || true
 
   sleep 2
