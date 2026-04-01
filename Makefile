@@ -31,13 +31,16 @@ GOARCH ?= $(shell go env GOARCH)
 SERVICES := demo-agent echo-tool time-tool token-exchange-service
 REALM := kagenti
 
-.PHONY: up test down platform
+.PHONY: up test down platform config
 
 platform: ## Show detected platform and configuration
 	@echo "Platform: $(PLATFORM)"
 	@echo "Registry: $(REGISTRY)"
 	@echo "KC_URL: $(KC_URL)"
 	@echo "Services: $(SERVICES)"
+
+config: ## Configure Istio mesh with kagenti-token-exchange ext_authz provider
+	@bash deploy/02-configure-istio.sh
 
 up: ## Build, configure Keycloak, deploy everything
 ifeq ($(IS_OPENSHIFT),true)
@@ -51,7 +54,9 @@ up-kind: ## Build and deploy on Kind
 		echo "ERROR: Kind cluster '$(CLUSTER_NAME)' not found."; exit 1; \
 	fi
 	@if ! kubectl get cm istio -n istio-system -o jsonpath='{.data.mesh}' 2>/dev/null | grep -q kagenti-token-exchange; then \
-		echo "ERROR: Istio mesh config missing 'kagenti-token-exchange' ext_authz provider."; exit 1; \
+		echo "ERROR: Istio mesh config missing 'kagenti-token-exchange' ext_authz provider."; \
+		echo "Run: make config"; \
+		exit 1; \
 	fi
 	@echo "=== Building for Kind ==="
 	@for svc in $(SERVICES); do \
@@ -77,7 +82,9 @@ up-kind: ## Build and deploy on Kind
 
 up-openshift: ## Build and deploy on OpenShift
 	@if ! kubectl get cm istio -n istio-system -o jsonpath='{.data.mesh}' 2>/dev/null | grep -q kagenti-token-exchange; then \
-		echo "ERROR: Istio mesh config missing 'kagenti-token-exchange' ext_authz provider."; exit 1; \
+		echo "ERROR: Istio mesh config missing 'kagenti-token-exchange' ext_authz provider."; \
+		echo "Run: make config"; \
+		exit 1; \
 	fi
 	@if [ -z "$(KC_ROUTE)" ]; then \
 		echo "ERROR: Keycloak route not found in namespace $(KEYCLOAK_NS)"; exit 1; \

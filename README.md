@@ -277,10 +277,13 @@ See the [kagenti repository](https://github.com/kagenti/kagenti) for cluster set
 ## Quick Start
 
 ```bash
+make config # configure Istio mesh with ext_authz provider (one-time setup)
 make up     # build + configure Keycloak + deploy
 make test   # run E2E tests
 make down   # remove K8s resources + Keycloak clients (realm is shared)
 ```
+
+**First time setup**: Run `make config` to add the `kagenti-token-exchange` ext_authz provider to your Istio mesh configuration. This is a one-time operation that patches the `istio` ConfigMap in `istio-system`.
 
 ## Platform Detection
 
@@ -323,6 +326,9 @@ On OpenShift, `make up` uses **S2I (Source-to-Image) builds**:
 
 **Prerequisites:**
 ```bash
+# 0. Configure Istio mesh (one-time)
+make config
+
 # 1. Create build namespace
 kubectl create namespace kagenti-images
 
@@ -348,7 +354,10 @@ On Kind, `make up` uses **Docker builds**:
 
 **Prerequisites:**
 ```bash
-# Kind cluster must be named 'kagenti' (or override CLUSTER_NAME)
+# 0. Configure Istio mesh (one-time)
+make config
+
+# 1. Kind cluster must be named 'kagenti' (or override CLUSTER_NAME)
 kind get clusters | grep kagenti
 ```
 
