@@ -26,7 +26,7 @@
 #   echo-tool / time-tool (tool-ns, same waypoint)
 #
 # Tests:
-#   1. Invalid token → agent-waypoint rejects (ext_authz denies before reaching agent)
+#   1. Invalid token → agent-waypoint rejects (ext_authz may return 401/403, plain text, or TCP RST → curl 56 / http_code 000)
 #   2. Valid token → echo-tool: waypoint exchanges → aud=echo-tool
 #   3. Valid token → time-tool: same waypoint exchanges → aud=time-tool
 #   4. Full E2E via HTTP_PROXY (no ambient mesh): user → agent → tool, proxy exchanges
@@ -34,6 +34,9 @@
 # Optional env:
 #   KC_URL — Keycloak base URL for token fetch (default http://localhost:18080 + port-forward).
 #            On ROSA: export KC_URL=https://keycloak-…openshiftapps.com
+#   CURL_IMAGE_PULL_SECRET — name of a docker pull secret in the curl pod namespace (docker.io
+#            rate limits). Prefer: ./deploy/openshift/copy-docker-pull-secret.sh <secret> agent-ns
+#            which links the secret to serviceaccount/default (then this var is optional).
 #
 set -euo pipefail
 
@@ -102,13 +105,29 @@ run_curl() {
 
   kubectl delete pod -n "$ns" "$pod_name" --force --grace-period=0 2>/dev/null || true
 
-  kubectl run "$pod_name" -n "$ns" \
-    --image=curlimages/curl:latest \
-    --restart=Never \
-    -- curl -sS --max-time 60 \
-    -H "Authorization: ${auth_value}" \
-    -w $'\n%{http_code}' \
-    "$url" 2>/dev/null
+  local overrides="" curl_img="${CURL_TEST_IMAGE:-curlimages/curl:latest}"
+  if [[ -n "${CURL_IMAGE_PULL_SECRET:-}" ]]; then
+    overrides=$(jq -nc --arg n "$CURL_IMAGE_PULL_SECRET" '{spec:{imagePullSecrets:[{name:$n}]}}')
+  fi
+
+  if [[ -n "$overrides" ]]; then
+    kubectl run "$pod_name" -n "$ns" \
+      --image="$curl_img" \
+      --restart=Never \
+      --overrides="$overrides" \
+      -- curl -sS --max-time 60 \
+      -H "Authorization: ${auth_value}" \
+      -w $'\n%{http_code}' \
+      "$url" 2>/dev/null
+  else
+    kubectl run "$pod_name" -n "$ns" \
+      --image="$curl_img" \
+      --restart=Never \
+      -- curl -sS --max-time 60 \
+      -H "Authorization: ${auth_value}" \
+      -w $'\n%{http_code}' \
+      "$url" 2>/dev/null
+  fi
 
   kubectl wait --for=jsonpath='{.status.phase}'=Succeeded "pod/$pod_name" -n "$ns" --timeout=120s 2>/dev/null \
     || kubectl wait --for=jsonpath='{.status.phase}'=Failed "pod/$pod_name" -n "$ns" --timeout=15s 2>/dev/null \
@@ -161,17 +180,23 @@ echo ""
 
 run_curl "curl-invalid" "Bearer $INVALID_TOKEN"
 
-TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null || true)
 
 if [[ -z "$TOOL_STATUS" ]]; then
   # No tool_status: inbound waypoint may have rejected (non-JSON body) or demo-agent JSON missing .tool_status
-  WAYPOINT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null)
+  WAYPOINT_ERROR=$(echo "$CURL_BODY" | jq -r '.error // empty' 2>/dev/null || true)
   if [[ -n "$WAYPOINT_ERROR" ]] && echo "$WAYPOINT_ERROR" | grep -qi "invalid token\|malformed\|unauthorized\|audience"; then
     detail "Rejected by agent-waypoint (inbound): $WAYPOINT_ERROR"
     ok "Invalid token rejected by agent-waypoint before reaching demo-agent"
   elif [[ "$CURL_HTTP_CODE" == "401" || "$CURL_HTTP_CODE" == "403" ]]; then
     detail "HTTP $CURL_HTTP_CODE from mesh (Envoy often returns plain text, not JSON)"
     ok "Invalid token rejected (HTTP $CURL_HTTP_CODE)"
+  elif [[ "$CURL_HTTP_CODE" == "000" || "$CURL_HTTP_CODE" == "0" ]]; then
+    detail "No HTTP response (curl %{http_code}=$CURL_HTTP_CODE); mesh may RST before any status line"
+    ok "Invalid token rejected (no HTTP response — connection dropped)"
+  elif [[ -n "$CURL_BODY" ]] && echo "$CURL_BODY" | grep -qiE "Recv failure|Connection reset|connection reset|errno 104"; then
+    detail "curl transport error: $CURL_BODY"
+    ok "Invalid token rejected (TCP reset / recv failure — common ext_authz deny path)"
   elif [[ -n "$CURL_BODY" ]] && echo "$CURL_BODY" | grep -qiE "jwt|unauthorized|denied|invalid|malformed|not valid"; then
     detail "Plain-text / non-JSON rejection body (typical for Istio ext_authz)"
     ok "Invalid token rejected (message in response body)"
@@ -181,8 +206,8 @@ if [[ -z "$TOOL_STATUS" ]]; then
     fail "Unexpected response (no tool_status, no recognized error)"
   fi
 elif [[ "$TOOL_STATUS" == "401" || "$TOOL_STATUS" == "403" ]]; then
-  TOOL_BODY=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
-  REJECT_REASON=$(echo "$TOOL_BODY" | jq -r '.error // empty' 2>/dev/null)
+  TOOL_BODY=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null || true)
+  REJECT_REASON=$(echo "$TOOL_BODY" | jq -r '.error // empty' 2>/dev/null || true)
   detail "demo-agent → echo-tool: HTTP $TOOL_STATUS"
   if [[ -n "$REJECT_REASON" ]]; then
     detail "Rejection reason: $REJECT_REASON"
@@ -241,7 +266,7 @@ echo ""
 
 run_curl "curl-valid" "Bearer $USER_TOKEN"
 
-TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null || true)
 
 if [[ "$TOOL_STATUS" != "200" ]]; then
   fail "Expected tool_status 200, got ${TOOL_STATUS:-<empty>}"
@@ -250,8 +275,8 @@ if [[ "$TOOL_STATUS" != "200" ]]; then
   detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service"
 else
   # Extract the token that echo-tool received from the echoed headers
-  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
-  RECEIVED_AUTH=$(echo "$TOOL_RESPONSE" | jq -r '.headers.Authorization // .headers.authorization // empty')
+  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null || true)
+  RECEIVED_AUTH=$(echo "$TOOL_RESPONSE" | jq -r '.headers.Authorization // .headers.authorization // empty' || true)
 
   if [[ -z "$RECEIVED_AUTH" ]]; then
     fail "echo-tool did not receive an Authorization header"
@@ -295,7 +320,7 @@ echo ""
 
 run_curl "curl-time" "Bearer $USER_TOKEN" "$AGENT_TIME_URL"
 
-TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null || true)
 
 if [[ "$TOOL_STATUS" != "200" ]]; then
   fail "Expected tool_status 200, got ${TOOL_STATUS:-<empty>}"
@@ -303,11 +328,11 @@ if [[ "$TOOL_STATUS" != "200" ]]; then
   detail "Response: $CURL_BODY"
   detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service"
 else
-  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
-  RECEIVED_AUD=$(echo "$TOOL_RESPONSE" | jq -r '.token_aud // "unknown"')
-  RECEIVED_AZP=$(echo "$TOOL_RESPONSE" | jq -r '.token_azp // "unknown"')
-  RECEIVED_SUB=$(echo "$TOOL_RESPONSE" | jq -r '.token_sub // "unknown"')
-  RECEIVED_TIME=$(echo "$TOOL_RESPONSE" | jq -r '.time // "unknown"')
+  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null || true)
+  RECEIVED_AUD=$(echo "$TOOL_RESPONSE" | jq -r '.token_aud // "unknown"' || true)
+  RECEIVED_AZP=$(echo "$TOOL_RESPONSE" | jq -r '.token_azp // "unknown"' || true)
+  RECEIVED_SUB=$(echo "$TOOL_RESPONSE" | jq -r '.token_sub // "unknown"' || true)
+  RECEIVED_TIME=$(echo "$TOOL_RESPONSE" | jq -r '.time // "unknown"' || true)
 
   detail "Token received by time-tool (after exchange):"
   detail "  aud: $RECEIVED_AUD"
@@ -362,7 +387,7 @@ spec:
     spec:
       containers:
         - name: echo-tool
-          image: localhost:5000/echo-tool:latest
+          image: image-registry.openshift-image-registry.svc:5000/kagenti-images/echo-tool:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -399,7 +424,7 @@ spec:
     spec:
       containers:
         - name: demo-agent
-          image: localhost:5000/demo-agent:latest
+          image: image-registry.openshift-image-registry.svc:5000/kagenti-images/demo-agent:latest
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -437,15 +462,15 @@ echo ""
 PROXY_AGENT_URL="http://demo-agent.$PROXY_TEST_NS.svc.cluster.local:8080/call/echo-tool"
 run_curl "curl-proxy" "Bearer ${USER_TOKEN}" "$PROXY_AGENT_URL" "$PROXY_TEST_NS"
 
-TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null)
+TOOL_STATUS=$(echo "$CURL_BODY" | jq -r '.tool_status // empty' 2>/dev/null || true)
 
 if [[ "$TOOL_STATUS" != "200" ]]; then
   fail "Proxy mode: expected tool_status 200, got $TOOL_STATUS"
   detail "Response: $CURL_BODY"
   detail "Debug: kubectl logs -n kagenti-system -l app=token-exchange-service --tail=10"
 else
-  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null)
-  RECEIVED_AUTH=$(echo "$TOOL_RESPONSE" | jq -r '.headers.Authorization // .headers.authorization // empty')
+  TOOL_RESPONSE=$(echo "$CURL_BODY" | jq -r '.tool_response_raw // empty' 2>/dev/null || true)
+  RECEIVED_AUTH=$(echo "$TOOL_RESPONSE" | jq -r '.headers.Authorization // .headers.authorization // empty' || true)
 
   if [[ -z "$RECEIVED_AUTH" ]]; then
     fail "echo-tool did not receive an Authorization header via proxy"

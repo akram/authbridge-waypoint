@@ -8,12 +8,14 @@
 # Usage: bash deploy/10-add-tool-demo.sh
 set -euo pipefail
 
+KEYCLOAK_ADMIN_USER="${KEYCLOAK_ADMIN_USER:-admin}"
+KEYCLOAK_ADMIN_PASSWORD="${KEYCLOAK_ADMIN_PASSWORD:-admin}"
 KEYCLOAK_SVC="${KEYCLOAK_SVC:-keycloak-service}"
 KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 REALM="kagenti"
 TOOL_NAME="weather-tool"
 TOOL_SECRET="weather-secret"
-KC_PORT=18080
+KC_PORT=8080
 PF_PID=""
 
 # ---------- Demo helpers ----------
@@ -24,12 +26,12 @@ DIM='\033[2m'
 RESET='\033[0m'
 
 narrate() { echo -e "\n${CYAN}$*${RESET}"; }
-prompt()  { echo -e "${DIM}press enter to continue...${RESET}"; read -r; }
+prompt()  { echo -e "${DIM}press enter to continue...${RESET}"; read -r || true; }
 
 # Show a command, wait for Enter, then run it.
 run() {
   printf "\n${GREEN}\$ %s${RESET}" "$*"
-  read -r
+  read -r || true
   eval "$@"
 }
 
@@ -37,7 +39,7 @@ cleanup() {
   [[ -n "$PF_PID" ]] && kill "$PF_PID" 2>/dev/null || true
   kubectl delete pod -n agent-ns curl-weather --force --grace-period=0 2>/dev/null || true
 }
-trap cleanup EXIT
+# trap cleanup EXIT
 
 # ---------- Setup: Keycloak access ----------
 
@@ -45,14 +47,22 @@ clear
 echo -n "Connecting to Keycloak..."
 { lsof -ti tcp:$KC_PORT | xargs kill; } 2>/dev/null || true
 sleep 1
-kubectl port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" $KC_PORT:8080 &>/dev/null &
+echo "oc port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" $KC_PORT:8080"
+oc port-forward -n "$KEYCLOAK_NS" "svc/$KEYCLOAK_SVC" $KC_PORT:8080 &>/dev/null &
 PF_PID=$!
 sleep 3
 
 KC_URL="http://localhost:$KC_PORT"
 
 ADMIN_TOKEN=$(curl -sf -X POST "$KC_URL/realms/master/protocol/openid-connect/token" \
-  -d "grant_type=password&client_id=admin-cli&username=admin&password=admin" | jq -r '.access_token')
+  -d "grant_type=password" \
+  -d "client_id=admin-cli" \
+  -d "username=${KEYCLOAK_ADMIN_USER}" \
+  -d "password=${KEYCLOAK_ADMIN_PASSWORD}" | jq -r '.access_token')
+if [[ -z "$ADMIN_TOKEN" || "$ADMIN_TOKEN" == "null" ]]; then
+  echo " failed: could not obtain Keycloak admin token (check KEYCLOAK_ADMIN_USER / KEYCLOAK_ADMIN_PASSWORD)." >&2
+  exit 1
+fi
 echo " ready."
 
 # ---------- Step 1: Register in Keycloak ----------
@@ -189,8 +199,8 @@ run "kubectl logs -n kagenti-system -l app=token-exchange-service --tail=5"
 echo ""
 narrate "Cleaning up..."
 
-kubectl delete deployment weather-tool -n tool-ns 2>/dev/null && echo "  Deleted deployment" || true
-kubectl delete service weather-tool -n tool-ns 2>/dev/null && echo "  Deleted service" || true
+# kubectl delete deployment weather-tool -n tool-ns 2>/dev/null && echo "  Deleted deployment" || true
+#kubectl delete service weather-tool -n tool-ns 2>/dev/null && echo "  Deleted service" || true
 
 WEATHER_UUID=$(curl -sf "$KC_URL/admin/realms/$REALM/clients?clientId=$TOOL_NAME" \
   -H "Authorization: Bearer $ADMIN_TOKEN" | jq -r '.[0].id')

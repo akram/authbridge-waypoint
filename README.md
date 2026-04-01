@@ -282,6 +282,114 @@ make test   # run E2E tests
 make down   # remove K8s resources + Keycloak clients (realm is shared)
 ```
 
+## Platform Detection
+
+The Makefile automatically detects whether you're running on **OpenShift** or **Kind** and configures itself accordingly.
+
+### Auto-Detection
+
+Platform detection is based on the presence of `route.openshift.io` API resources:
+
+| Platform | Detection | Registry | Keycloak Access |
+|----------|-----------|----------|-----------------|
+| **OpenShift** | `route.openshift.io` API exists | `image-registry.openshift-image-registry.svc:5000/kagenti-images` | Via ROSA route (HTTPS) |
+| **Kind** | No OpenShift APIs | `localhost:5000` | Via port-forward (HTTP) |
+
+### Check Your Platform
+
+```bash
+make platform
+```
+
+Example output (OpenShift):
+```
+Platform: openshift
+Registry: image-registry.openshift-image-registry.svc:5000/kagenti-images
+KC_URL: https://keycloak-keycloak.apps.rosa.akram.dxp0.p3.openshiftapps.com
+Services: demo-agent echo-tool time-tool token-exchange-service
+```
+
+### Platform-Specific Behavior
+
+#### OpenShift (ROSA)
+
+On OpenShift, `make up` uses **S2I (Source-to-Image) builds**:
+
+1. Triggers OpenShift BuildConfigs in the `kagenti-images` namespace
+2. Uses `oc start-build` for each service
+3. Images pushed to internal OpenShift registry
+4. Updates deployments to use OpenShift registry images
+5. Configures Keycloak via the ROSA route (no port-forwarding)
+
+**Prerequisites:**
+```bash
+# 1. Create build namespace
+kubectl create namespace kagenti-images
+
+# 2. Deploy BuildConfigs
+kubectl apply -f deploy/openshift/golang-s2i-buildconfigs.yaml
+
+# 3. Set up image pull permissions
+kubectl apply -f deploy/openshift/image-puller-bindings.yaml
+
+# 4. Verify Keycloak route exists
+kubectl get route keycloak -n keycloak
+```
+
+#### Kind (Local)
+
+On Kind, `make up` uses **Docker builds**:
+
+1. Builds Go binaries locally
+2. Creates Docker images with local Docker daemon
+3. Loads images into Kind cluster
+4. Port-forwards to Keycloak for setup
+5. Deploys with `localhost:5000` image references
+
+**Prerequisites:**
+```bash
+# Kind cluster must be named 'kagenti' (or override CLUSTER_NAME)
+kind get clusters | grep kagenti
+```
+
+### Environment Variables
+
+Override auto-detected settings:
+
+| Variable | Default (OpenShift) | Default (Kind) | Description |
+|----------|---------------------|----------------|-------------|
+| `OPENSHIFT_IMAGE_PROJECT` | `kagenti-images` | N/A | Namespace for S2I builds |
+| `REGISTRY` | (auto) | `localhost:5000` | Container registry |
+| `KC_URL` | (from route) | `http://localhost:18080` | Keycloak URL |
+| `CLUSTER_NAME` | N/A | `kagenti` | Kind cluster name |
+| `TAG` | `latest` | `latest` | Image tag |
+
+**Examples:**
+
+```bash
+# Use custom build namespace on OpenShift
+make up OPENSHIFT_IMAGE_PROJECT=my-builds
+
+# Force specific registry
+make up REGISTRY=my-registry.example.com/project
+
+# Use custom Keycloak URL
+make test KC_URL=https://my-keycloak.example.com
+```
+
+### Testing on OpenShift
+
+Tests automatically use:
+- Keycloak ROSA route (HTTPS, no port-forward)
+- UBI-based curl image (avoids Docker Hub rate limits)
+- OpenShift registry for test workloads
+
+```bash
+make test
+# Equivalent to:
+# KC_URL=https://keycloak-... CURL_TEST_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:latest bash deploy/09-test.sh
+```
+
 ## Components
 
 | Component | Path | Description |
