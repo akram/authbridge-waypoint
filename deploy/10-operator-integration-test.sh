@@ -34,7 +34,9 @@
 #   KC_URL          — Keycloak base URL (default: http://localhost:18080)
 #   OPERATOR_NS     — Namespace where kagenti-operator runs (default: kagenti-operator-system)
 #   WEBHOOK_NS      — Namespace where kagenti-webhook runs (default: kagenti-webhook-system)
-#   SKIP_CLEANUP    — Set to "true" to skip cleanup for debugging
+#   SKIP_CLEANUP    — Set to "true" to preserve resources and inspect pods/sidecars
+#                     When enabled, the script outputs detailed inspection commands
+#                     Usage: export SKIP_CLEANUP=true && ./10-operator-integration-test.sh
 #
 set -euo pipefail
 
@@ -116,7 +118,62 @@ print_token_info() {
 
 cleanup() {
   if [[ "$SKIP_CLEANUP" == "true" ]]; then
-    info "Skipping cleanup (SKIP_CLEANUP=true)"
+    echo ""
+    section "Resources Preserved for Inspection"
+    info "Cleanup skipped (SKIP_CLEANUP=true)"
+    echo ""
+    info "Test resources have been preserved. Use the following commands to inspect:"
+    echo ""
+
+    detail "# View all pods in both namespaces"
+    detail "kubectl get pods -n $TEAM1_NS -o wide"
+    detail "kubectl get pods -n $TEAM2_NS -o wide"
+    echo ""
+
+    detail "# Check pod details and injected containers/volumes"
+    detail "kubectl describe pod -n $TEAM1_NS -l app=team1-agent"
+    detail "kubectl describe pod -n $TEAM2_NS -l app=team2-agent"
+    echo ""
+
+    detail "# View operator-created secrets"
+    detail "kubectl get secrets -n $TEAM1_NS | grep kagenti-keycloak"
+    detail "kubectl get secrets -n $TEAM2_NS | grep kagenti-keycloak"
+    echo ""
+
+    detail "# Inspect secret contents"
+    detail "kubectl get secret -n $TEAM1_NS \$(kubectl get secrets -n $TEAM1_NS -o name | grep kagenti-keycloak) -o yaml"
+    echo ""
+
+    detail "# Check deployment annotations (operator adds these)"
+    detail "kubectl get deployment team1-agent -n $TEAM1_NS -o jsonpath='{.spec.template.metadata.annotations}' | jq"
+    detail "kubectl get deployment team2-agent -n $TEAM2_NS -o jsonpath='{.spec.template.metadata.annotations}' | jq"
+    echo ""
+
+    detail "# View waypoint gateways"
+    detail "kubectl get gateway -n $TEAM1_NS"
+    detail "kubectl get gateway -n $TEAM2_NS"
+    echo ""
+
+    detail "# Check authorization policies"
+    detail "kubectl get authorizationpolicy -n $TEAM1_NS"
+    detail "kubectl get authorizationpolicy -n $TEAM2_NS"
+    echo ""
+
+    detail "# View operator logs for reconciliation"
+    detail "kubectl logs -n $OPERATOR_NS -l control-plane=controller-manager --tail=50 | grep -i team"
+    echo ""
+
+    detail "# Verify Keycloak clients were created (requires port-forward)"
+    detail "kubectl port-forward -n keycloak svc/keycloak-service 18080:8080 &"
+    detail "# Then query Keycloak API:"
+    detail "curl -s -X POST http://localhost:18080/realms/kagenti/protocol/openid-connect/token \\"
+    detail "  -d 'grant_type=client_credentials' -d 'client_id=admin-cli' -d 'client_secret=admin-secret' | jq -r '.access_token'"
+    echo ""
+
+    info "When done inspecting, clean up with:"
+    detail "kubectl delete namespace $TEAM1_NS $TEAM2_NS"
+    echo ""
+
     return 0
   fi
 
@@ -753,4 +810,63 @@ if [[ "$FAIL" -gt 0 ]]; then
 fi
 
 info "All tests passed! ✓"
+
+if [[ "$SKIP_CLEANUP" == "true" ]]; then
+  echo ""
+  section "What to Check for Sidecar Injection"
+  echo ""
+  info "The test resources are still running. Here's what to verify:"
+  echo ""
+
+  detail "1. Check if webhook injected sidecars into pods:"
+  detail "   kubectl get pods -n $TEAM1_NS -o jsonpath='{.items[*].spec.containers[*].name}'"
+  detail "   kubectl get pods -n $TEAM2_NS -o jsonpath='{.items[*].spec.containers[*].name}'"
+  detail "   Expected: Should show multiple containers if webhook injected sidecars"
+  echo ""
+
+  detail "2. Verify operator-provisioned credentials are mounted:"
+  detail "   kubectl exec -n $TEAM1_NS deploy/team1-agent -- ls -la /shared/ 2>/dev/null || echo 'No /shared mount'"
+  detail "   Expected: Should see client-id.txt and client-secret.txt if webhook mounted them"
+  echo ""
+
+  detail "3. Check pod volumes (should include operator secret):"
+  detail "   kubectl get pod -n $TEAM1_NS -l app=team1-agent -o jsonpath='{.items[0].spec.volumes[*].name}' | tr ' ' '\n'"
+  detail "   Expected: Should include volume named like 'kagenti-keycloak-client-credentials-*'"
+  echo ""
+
+  detail "4. View complete pod YAML to see injection:"
+  detail "   kubectl get pod -n $TEAM1_NS -l app=team1-agent -o yaml | less"
+  detail "   Look for: initContainers, sidecar containers, volume mounts, annotations"
+  echo ""
+
+  detail "5. Check if pods are using the waypoint:"
+  detail "   kubectl get pods -n $TEAM1_NS -o yaml | grep -A 5 'istio.io/use-waypoint'"
+  detail "   Expected: Should show waypoint configuration"
+  echo ""
+
+  detail "6. Verify Keycloak client creation (check operator logs):"
+  detail "   kubectl logs -n $OPERATOR_NS -l control-plane=controller-manager --tail=100 | grep 'team1-agent\\|team2-agent'"
+  detail "   Expected: Should show successful client creation messages"
+  echo ""
+
+  detail "7. Test token acquisition using operator-provisioned credentials:"
+  detail "   # Get credentials from secret"
+  detail "   CLIENT_ID=\$(kubectl get secret -n $TEAM1_NS \$(kubectl get secrets -n $TEAM1_NS -o name | grep kagenti-keycloak) -o jsonpath='{.data.client-id\.txt}' | base64 -d)"
+  detail "   CLIENT_SECRET=\$(kubectl get secret -n $TEAM1_NS \$(kubectl get secrets -n $TEAM1_NS -o name | grep kagenti-keycloak) -o jsonpath='{.data.client-secret\.txt}' | base64 -d)"
+  detail "   # Get token from Keycloak"
+  detail "   kubectl port-forward -n keycloak svc/keycloak-service 18080:8080 &"
+  detail "   curl -X POST http://localhost:18080/realms/kagenti/protocol/openid-connect/token \\"
+  detail "     -d \"grant_type=client_credentials\" -d \"client_id=\$CLIENT_ID\" -d \"client_secret=\$CLIENT_SECRET\""
+  echo ""
+
+  info "Summary of what the operator + webhook did:"
+  detail "✓ Operator detected deployments with label 'kagenti.io/type: agent'"
+  detail "✓ Operator created Keycloak clients (team1/team1-agent, team2/team2-agent)"
+  detail "✓ Operator provisioned credential Secrets with ownership references"
+  detail "✓ Operator annotated pod templates with secret names"
+  detail "✓ Webhook (should have) injected sidecars and mounted credentials"
+  detail "✓ Waypoints configured for token exchange"
+  echo ""
+fi
+
 exit 0

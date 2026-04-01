@@ -150,13 +150,29 @@ export KC_URL="https://keycloak-keycloak.apps.<cluster-domain>"
 | `WEBHOOK_NS` | `kagenti-webhook-system` | Webhook namespace |
 | `SKIP_CLEANUP` | `false` | Skip cleanup for debugging |
 
-### Debug Mode
+### Debug Mode - Inspecting Pods and Sidecars
 
-To keep test resources for debugging:
+To preserve test resources and inspect sidecar injection:
 
 ```bash
 export SKIP_CLEANUP=true
 ./deploy/10-operator-integration-test.sh
+```
+
+When `SKIP_CLEANUP=true` is set, the test will:
+- Preserve all created namespaces, pods, and resources after completion
+- Output detailed inspection commands showing how to verify:
+  - Webhook sidecar injection
+  - Operator-provisioned credentials mounted in pods
+  - Secret volumes and volume mounts
+  - Waypoint configuration
+  - Keycloak client creation
+- Provide commands to test token acquisition using the provisioned credentials
+
+After inspecting the resources, clean up manually with:
+
+```bash
+kubectl delete namespace team1 team2
 ```
 
 ## Test Flow
