@@ -85,6 +85,136 @@ JWT validation and token exchange are both handled in ext_authz (not `RequestAut
 - Requests without an Authorization header are allowed only on bypass paths (`/.well-known/*`, `/healthz`, `/readyz`, `/livez`). All other unauthenticated requests are rejected. Override via `BYPASS_INBOUND_PATHS` env var (comma-separated, same pattern as AuthBridge).
 - No two-phase problem — the waypoint doesn't need to skip validation of the exchanged token
 
+## Istio Extension Provider
+
+An **extension provider** in Istio is a mechanism to plug external services into Envoy's request processing pipeline. Think of it as a hook that lets you run custom logic on every request.
+
+### Configuration
+
+The `kagenti-token-exchange` extension provider is configured in the Istio mesh (`make config` adds this):
+
+```yaml
+extensionProviders:
+- name: kagenti-token-exchange
+  envoyExtAuthzGrpc:
+    service: token-exchange-service.kagenti-system.svc.cluster.local
+    port: 9090
+```
+
+This registration makes the provider **available** to any waypoint or gateway in the cluster, but doesn't activate it yet.
+
+### Activation via AuthorizationPolicy
+
+The provider is activated by referencing it in an `AuthorizationPolicy`:
+
+```yaml
+apiVersion: security.istio.io/v1
+kind: AuthorizationPolicy
+metadata:
+  name: tool-waypoint-token-exchange
+  namespace: tool-ns
+spec:
+  action: CUSTOM
+  provider:
+    name: kagenti-token-exchange  # ← References the extension provider
+  rules:
+  - to:
+    - operation:
+        notPaths: ["/.well-known/*", "/healthz", "/readyz"]
+```
+
+### Request Flow
+
+When a request hits a waypoint with this policy:
+
+```
+Client Request
+    │
+    ▼
+Waypoint (Envoy) ──────────────┐
+    │                          │
+    │                          ▼
+    │                    ext_authz gRPC call
+    │                    token-exchange-service:9090
+    │                          │
+    │                          ├─ 1. Validate JWT
+    │                          ├─ 2. Check if aud includes destination
+    │                          ├─ 3. If not, exchange via Keycloak
+    │                          └─ 4. Return OK + replacement header
+    │                          │
+    ▼                          ▼
+Modified Request ◄─────── CheckResponse
+(Authorization: Bearer <tool-token>)
+    │
+    ▼
+Tool Service
+```
+
+### Why External Authorization?
+
+Comparison with Istio's built-in JWT validation:
+
+| Feature | RequestAuthentication | ext_authz (our approach) |
+|---------|----------------------|-------------------------|
+| JWT validation | ✅ Yes | ✅ Yes |
+| Token exchange | ❌ No | ✅ Yes |
+| Header mutation | ❌ No | ✅ Can replace headers |
+| Custom error messages | ❌ Generic 401 | ✅ `{"error": "token expired"}` |
+| Bypass paths | Complex (multiple policies) | ✅ Simple (`notPaths` rule) |
+| Shared logic | Per-namespace | ✅ One service for entire cluster |
+
+### Multi-Waypoint Architecture
+
+One extension provider service handles all waypoints:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│      token-exchange-service (kagenti-system)            │
+│                                                         │
+│  gRPC: envoy.service.auth.v3.Authorization              │
+│  - Validates JWT                                        │
+│  - Exchanges tokens via Keycloak                        │
+│  - Caches results                                       │
+└──────────────┬──────────────────────────────────────────┘
+               │
+   ┌───────────┴──────────┬─────────────────┬────────────
+   ▼                      ▼                 ▼
+agent-waypoint       tool-waypoint    egress-gateway
+(agent-ns)           (tool-ns)        (istio-system)
+   │                      │                 │
+   │ aud includes         │ aud missing     │ external tools
+   │ destination          │ destination     │
+   │ → pass through       │ → exchange      │ → exchange
+```
+
+Each waypoint references the same `kagenti-token-exchange` provider, but the service makes different decisions based on the request context (specifically, whether the token's `aud` claim includes the destination service name).
+
+### What `make config` Does
+
+Running `make config` is a **one-time setup** that registers the extension provider with Istio:
+
+1. **Patches the Istio ConfigMap** (`istio` in `istio-system` namespace)
+2. **Adds the extensionProviders entry**:
+   ```yaml
+   extensionProviders:
+   - name: kagenti-token-exchange
+     envoyExtAuthzGrpc:
+       service: token-exchange-service.kagenti-system.svc.cluster.local
+       port: 9090
+   ```
+3. **Makes the provider available** cluster-wide (but doesn't activate it)
+4. **Idempotent**: Safe to run multiple times, skips if already configured
+
+After running `make config`, the provider is registered but inactive. It only becomes active when an `AuthorizationPolicy` references it by name. This two-phase approach (registration + activation) allows you to:
+- Register the provider once globally
+- Activate it selectively in specific namespaces via policies
+- Use the same provider across multiple waypoints without duplication
+
+**Note**: After `make config`, istiod may need a restart to pick up the change, or wait a few minutes for automatic detection:
+```bash
+kubectl rollout restart deployment/istiod -n istio-system
+```
+
 ## Waypoint Placement
 
 Istio waypoints are **strictly destination-side** — they intercept traffic going TO services in their namespace, never outbound FROM them. This was validated during the PoC: a workload-level waypoint (`waypoint-for: workload` or `all`) in agent-ns does not see outbound calls to tools in other namespaces.
