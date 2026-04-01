@@ -1,6 +1,6 @@
-# Enabling ztunnel for Istio Ambient Mesh
+# Enabling Waypoint Gateways for Istio Ambient Mesh
 
-This guide explains how to enable ztunnel (the L4 proxy) required for Istio ambient mesh waypoint functionality.
+This guide explains how to configure waypoint gateways for Istio ambient mesh functionality.
 
 ## Current Cluster Status
 
@@ -8,7 +8,52 @@ Your cluster has:
 - ✅ Istio version: **1.28.4** (OpenShift Service Mesh variant)
 - ✅ Ambient enabled: `PILOT_ENABLE_AMBIENT=true`
 - ✅ Gateway class: `istio-waypoint` available
-- ❌ **ztunnel DaemonSet**: MISSING (this is what we need to install)
+- ✅ **ztunnel DaemonSet**: Running in `istio-ztunnel` namespace
+- ✅ **Issue identified**: Missing required labels on namespaces and gateways
+
+## Root Cause: Missing Labels (Not ztunnel)
+
+**The actual issue was NOT missing ztunnel** - it was already installed and running in the `istio-ztunnel` namespace. The problem was missing labels that prevented Istio from programming the waypoint gateways.
+
+### Required Labels
+
+**1. Namespace Label:**
+```yaml
+istio-discovery: enabled  # Required for istiod to watch the namespace
+```
+
+Without this label, istiod ignores Gateway resources in the namespace, resulting in:
+- Gateway status: `PROGRAMMED: Unknown`
+- Status message: "Waiting for controller"
+- No waypoint pods created
+
+**2. Gateway Label:**
+```yaml
+metadata:
+  labels:
+    istio.io/waypoint-for: all  # Tells Istio what the waypoint is for
+```
+
+Without this label, the controller doesn't program the gateway even if discovered.
+
+### Quick Fix
+
+If your gateways show `PROGRAMMED: Unknown`:
+
+```bash
+# Add the discovery label to your namespace
+kubectl label ns team1 istio-discovery=enabled
+
+# Gateway should become PROGRAMMED within seconds
+kubectl get gateway team1-waypoint -n team1
+# NAME             CLASS            ADDRESS         PROGRAMMED   AGE
+# team1-waypoint   istio-waypoint   172.30.24.215   True         1m
+
+# Waypoint pod will be created automatically
+kubectl get pods -n team1 -l gateway.networking.k8s.io/gateway-name=team1-waypoint
+# NAME                              READY   STATUS    RESTARTS   AGE
+# team1-waypoint-67c48b5db8-mnzcn   1/1     Running   0          30s
+```
 
 ## What is ztunnel?
 
