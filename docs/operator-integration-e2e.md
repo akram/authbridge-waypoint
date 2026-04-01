@@ -148,6 +148,7 @@ export KC_URL="https://keycloak-keycloak.apps.<cluster-domain>"
 | `KEYCLOAK_NS` | `keycloak` | Keycloak namespace |
 | `OPERATOR_NS` | `kagenti-operator-system` | Operator namespace |
 | `WEBHOOK_NS` | `kagenti-webhook-system` | Webhook namespace |
+| `ENABLE_SIDECAR` | `false` | Enable AuthBridge sidecar injection |
 | `SKIP_CLEANUP` | `false` | Skip cleanup for debugging |
 
 ### Debug Mode - Inspecting Pods and Sidecars
