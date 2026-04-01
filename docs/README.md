@@ -64,6 +64,14 @@ The authbridge-waypoint architecture replaces per-pod sidecars with a **shared t
   - Complete E2E example with operator-managed clients
   - Configuration requirements and troubleshooting
 
+- **[Client Registration Explained](client-registration-explained.md)**
+  - What client registration does and why it's critical
+  - Two purposes of a Keycloak client (authentication + exchange target)
+  - What happens WITH vs WITHOUT client registration
+  - Why `standard.token.exchange.enabled=true` is required
+  - Real-world failure scenarios and fixes
+  - Troubleshooting guide for registration issues
+
 ### Service Documentation
 
 - **[Token Exchange Service](../cmd/token-exchange-service/README.md)**
