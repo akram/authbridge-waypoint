@@ -46,6 +46,14 @@ The authbridge-waypoint architecture replaces per-pod sidecars with a **shared t
   - Multi-namespace deployment strategies
   - Token audience strategies (broad vs dynamic exchange)
 
+- **[Operator Client Registration Integration](operator-client-registration-integration.md)**
+  - How kagenti-operator and token-exchange-service work together
+  - Two-phase security model (client lifecycle + runtime exchange)
+  - Keycloak client registration and credential provisioning
+  - RFC 8693 token exchange flow
+  - Complete E2E example with operator-managed clients
+  - Configuration requirements and troubleshooting
+
 ### Service Documentation
 
 - **[Token Exchange Service](../cmd/token-exchange-service/README.md)**
