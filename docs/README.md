@@ -29,6 +29,16 @@ The authbridge-waypoint architecture replaces per-pod sidecars with a **shared t
 
 ## Detailed Documentation
 
+### Getting Started
+
+- **[Architecture Deep Dive](architecture-deep-dive.md)** ⭐ **START HERE**
+  - Complete system overview for newcomers
+  - What each component does and how it installs
+  - How components communicate and integrate
+  - Complete request lifecycle walkthrough
+  - Comparison with traditional approaches
+  - Benefits, trade-offs, and installation guide
+
 ### Architecture and Configuration
 
 - **[Extension Provider Scope and Auto-Enablement](extension-provider-scope.md)**
