@@ -201,6 +201,7 @@ info "Creating team1 and team2 namespaces with ambient mesh + waypoints..."
 retry_kubectl kubectl create ns "$TEAM1_NS" 2>/dev/null || true
 sleep 1
 retry_kubectl kubectl label ns "$TEAM1_NS" \
+  istio-discovery=enabled \
   istio.io/dataplane-mode=ambient \
   istio.io/use-waypoint=team1-waypoint \
   kagenti-enabled="true" \
@@ -210,6 +211,7 @@ retry_kubectl kubectl label ns "$TEAM1_NS" \
 retry_kubectl kubectl create ns "$TEAM2_NS" 2>/dev/null || true
 sleep 1
 retry_kubectl kubectl label ns "$TEAM2_NS" \
+  istio-discovery=enabled \
   istio.io/dataplane-mode=ambient \
   istio.io/use-waypoint=team2-waypoint \
   kagenti-enabled="true" \
@@ -284,6 +286,8 @@ kind: Gateway
 metadata:
   name: team1-waypoint
   namespace: $TEAM1_NS
+  labels:
+    istio.io/waypoint-for: all
 spec:
   gatewayClassName: istio-waypoint
   listeners:
@@ -296,6 +300,8 @@ kind: Gateway
 metadata:
   name: team2-waypoint
   namespace: $TEAM2_NS
+  labels:
+    istio.io/waypoint-for: all
 spec:
   gatewayClassName: istio-waypoint
   listeners:
