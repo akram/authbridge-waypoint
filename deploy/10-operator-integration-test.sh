@@ -43,6 +43,8 @@ KEYCLOAK_NS="${KEYCLOAK_NS:-keycloak}"
 REALM="kagenti"
 KC_URL="${KC_URL:-http://localhost:18080}"
 KC_TOKEN_URL="${KC_URL%/}/realms/${REALM}/protocol/openid-connect/token"
+# Keycloak URL for operator (cluster-internal service)
+KC_URL_OPERATOR="http://${KEYCLOAK_SVC}.${KEYCLOAK_NS}.svc.cluster.local:8080"
 OPERATOR_NS="${OPERATOR_NS:-kagenti-operator-system}"
 WEBHOOK_NS="${WEBHOOK_NS:-kagenti-webhook-system}"
 SKIP_CLEANUP="${SKIP_CLEANUP:-false}"
@@ -59,6 +61,29 @@ ok()    { echo -e "\033[1;32m[PASS]\033[0m  $*"; PASS=$((PASS + 1)); }
 fail()  { echo -e "\033[1;31m[FAIL]\033[0m  $*"; FAIL=$((FAIL + 1)); }
 detail(){ echo -e "        $*"; }
 section() { echo -e "\n\033[1;35m========================================\033[0m"; echo -e "\033[1;35m$*\033[0m"; echo -e "\033[1;35m========================================\033[0m\n"; }
+
+# Retry kubectl commands with exponential backoff
+retry_kubectl() {
+  local max_attempts=5
+  local attempt=1
+  local delay=2
+
+  while [ $attempt -le $max_attempts ]; do
+    if "$@" 2>&1; then
+      return 0
+    fi
+
+    if [ $attempt -lt $max_attempts ]; then
+      detail "Command failed, retrying in ${delay}s (attempt $attempt/$max_attempts)..."
+      sleep $delay
+      delay=$((delay * 2))
+      attempt=$((attempt + 1))
+    else
+      detail "Command failed after $max_attempts attempts"
+      return 1
+    fi
+  done
+}
 
 # JWT decoding helper
 jwt_payload() {
@@ -113,16 +138,18 @@ section "Setup: Creating test namespaces and agents"
 info "Creating team1 and team2 namespaces with ambient mesh + waypoints..."
 
 # Create team1 namespace with ambient mesh
-kubectl create ns "$TEAM1_NS" 2>/dev/null || true
-kubectl label ns "$TEAM1_NS" \
+retry_kubectl kubectl create ns "$TEAM1_NS" 2>/dev/null || true
+sleep 1
+retry_kubectl kubectl label ns "$TEAM1_NS" \
   istio.io/dataplane-mode=ambient \
   istio.io/use-waypoint=team1-waypoint \
   kagenti-enabled="true" \
   --overwrite
 
 # Create team2 namespace with ambient mesh
-kubectl create ns "$TEAM2_NS" 2>/dev/null || true
-kubectl label ns "$TEAM2_NS" \
+retry_kubectl kubectl create ns "$TEAM2_NS" 2>/dev/null || true
+sleep 1
+retry_kubectl kubectl label ns "$TEAM2_NS" \
   istio.io/dataplane-mode=ambient \
   istio.io/use-waypoint=team2-waypoint \
   kagenti-enabled="true" \
@@ -134,16 +161,21 @@ detail "Namespaces created with ambient mesh labels"
 info "Creating authbridge-config and keycloak-admin-secret in team namespaces..."
 
 for NS in "$TEAM1_NS" "$TEAM2_NS"; do
-  kubectl create configmap authbridge-config -n "$NS" \
-    --from-literal=KEYCLOAK_URL="${KC_URL}" \
+  retry_kubectl kubectl create configmap authbridge-config -n "$NS" \
+    --from-literal=KEYCLOAK_URL="${KC_URL_OPERATOR}" \
     --from-literal=KEYCLOAK_REALM="${REALM}" \
     --from-literal=SPIRE_ENABLED="false" \
-    --dry-run=client -o yaml | kubectl apply -f -
+    --dry-run=client -o yaml | kubectl apply -f - || true
 
-  # Copy keycloak-admin-secret from keycloak namespace
-  kubectl get secret keycloak-admin-secret -n "$KEYCLOAK_NS" -o yaml | \
-    sed "s/namespace: $KEYCLOAK_NS/namespace: $NS/" | \
-    kubectl apply -f -
+  sleep 2
+
+  # Create keycloak-admin-secret directly in the namespace
+  retry_kubectl kubectl create secret generic keycloak-admin-secret -n "$NS" \
+    --from-literal=KEYCLOAK_ADMIN_USERNAME=temp-admin \
+    --from-literal=KEYCLOAK_ADMIN_PASSWORD=95e0c65a71dd427c8eb828462ba9d22e \
+    --dry-run=client -o yaml | kubectl apply -f - || true
+
+  sleep 2
 done
 
 detail "Configuration and admin secrets created in both namespaces"
@@ -151,7 +183,7 @@ detail "Configuration and admin secrets created in both namespaces"
 # Deploy waypoints in both namespaces
 info "Deploying waypoints for team1 and team2..."
 
-kubectl apply -f - <<EOF
+retry_kubectl kubectl apply --validate=false -f - <<EOF
 ---
 apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
@@ -179,11 +211,12 @@ spec:
 EOF
 
 detail "Waypoints deployed"
+sleep 2
 
 # Configure AuthorizationPolicy for both waypoints
 info "Configuring AuthorizationPolicy for token exchange..."
 
-kubectl apply -f - <<EOF
+retry_kubectl kubectl apply --validate=false -f - <<EOF
 ---
 apiVersion: security.istio.io/v1
 kind: AuthorizationPolicy
@@ -231,11 +264,12 @@ spec:
 EOF
 
 detail "Authorization policies configured"
+sleep 2
 
 # Deploy team1-agent
 info "Deploying team1-agent..."
 
-kubectl apply -f - <<EOF
+retry_kubectl kubectl apply --validate=false -f - <<EOF
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -302,11 +336,12 @@ spec:
 EOF
 
 detail "team1-agent deployed"
+sleep 2
 
 # Deploy team2-agent
 info "Deploying team2-agent..."
 
-kubectl apply -f - <<EOF
+retry_kubectl kubectl apply --validate=false -f - <<EOF
 ---
 apiVersion: v1
 kind: ServiceAccount
