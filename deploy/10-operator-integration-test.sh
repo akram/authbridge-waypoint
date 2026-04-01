@@ -228,6 +228,7 @@ for NS in "$TEAM1_NS" "$TEAM2_NS"; do
   retry_kubectl kubectl create configmap authbridge-config -n "$NS" \
     --from-literal=KEYCLOAK_URL="${KC_URL_OPERATOR}" \
     --from-literal=KEYCLOAK_REALM="${REALM}" \
+    --from-literal=ISSUER="${KC_URL_OPERATOR}/realms/${REALM}" \
     --from-literal=SPIRE_ENABLED="false" \
     --dry-run=client -o yaml | kubectl apply -f - || true
 
