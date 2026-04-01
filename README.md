@@ -215,6 +215,180 @@ After running `make config`, the provider is registered but inactive. It only be
 kubectl rollout restart deployment/istiod -n istio-system
 ```
 
+## Token Exchange Service Deep Dive
+
+The **token-exchange-service** (`cmd/token-exchange-service/`) is the core of this architecture. It's a single Go service deployed in `kagenti-system` namespace that handles all JWT validation and token exchange for the entire cluster.
+
+### Dual Interface Design
+
+The service provides two interfaces with identical authorization logic:
+
+```
+┌────────────────────────────────────────────────────────────┐
+│            token-exchange-service (kagenti-system)         │
+│                                                            │
+│  ┌─────────────────┐              ┌──────────────────┐    │
+│  │  gRPC :9090     │              │  HTTP Proxy :8080│    │
+│  │  (ext_authz)    │              │  (HTTP_PROXY)    │    │
+│  └────────┬────────┘              └────────┬─────────┘    │
+│           │                                │              │
+│           └──────────┬─────────────────────┘              │
+│                      ▼                                    │
+│           ┌──────────────────────┐                        │
+│           │  Shared Auth Logic   │                        │
+│           │  - Validate JWT      │                        │
+│           │  - Check aud         │                        │
+│           │  - Exchange if needed│                        │
+│           └──────────────────────┘                        │
+└────────────────────────────────────────────────────────────┘
+```
+
+**1. gRPC ext_authz (Port 9090)** - For Istio waypoints
+- Protocol: `envoy.service.auth.v3.Authorization`
+- Called by Envoy's ext_authz filter
+- Returns: `CheckResponse` with `OkHttpResponse.headers_to_set`
+- Used in: Waypoint mode (ambient mesh)
+
+**2. HTTP Forward Proxy (Port 8080)** - For standard HTTP clients
+- Protocol: HTTP CONNECT proxy
+- Set via `HTTP_PROXY` environment variable on workloads
+- Returns: Proxied response with modified `Authorization` header
+- Used in: Non-mesh mode (any namespace)
+
+### Authorization Decision Logic
+
+For every request, the service follows this decision tree:
+
+```
+1. Extract Authorization header
+   ├─ Missing + bypass path (/.well-known/*, /healthz)
+   │  └─ ALLOW (no auth required)
+   └─ Missing + protected path
+      └─ DENY (401 "no Authorization header")
+
+2. Validate JWT
+   ├─ Parse and verify signature (using cached JWKS)
+   ├─ Check issuer (must match ISSUER_URL)
+   └─ Check expiration
+      ├─ Invalid → DENY (401 with specific error)
+      └─ Valid → continue
+
+3. Check audience (aud claim)
+   ├─ Extract destination from Host header
+   │  Example: "echo-tool.tool-ns.svc.cluster.local" → "echo-tool"
+   └─ Check if token.aud includes destination
+
+4. Make decision
+   ├─ aud includes destination
+   │  └─ ALLOW (pass through original token)
+   └─ aud missing destination
+      └─ EXCHANGE via Keycloak RFC 8693
+         ├─ Check cache (subject_token_hash, audience)
+         │  ├─ HIT → return cached token
+         │  └─ MISS → call Keycloak
+         ├─ POST /realms/kagenti/protocol/openid-connect/token
+         │  grant_type=urn:ietf:params:oauth:grant-type:token-exchange
+         │  subject_token=<original>
+         │  audience=<destination>
+         ├─ Cache result (TTL = expires_in - 30s)
+         └─ ALLOW with replacement token (aud=destination)
+```
+
+### Why This Design Works
+
+**Convention over Configuration**:
+- Service name = first segment of FQDN = Keycloak client ID
+- Example: `echo-tool.tool-ns.svc` → audience `echo-tool`
+- No mapping files, no per-tool configuration
+
+**Smart Caching**:
+- **JWKS cache**: Keycloak public keys (15min refresh)
+  - Avoids calling `/certs` on every request
+  - Typical: 10-20 keys × 2KB = ~40KB
+- **Token cache**: Exchanged tokens (TTL = expires_in - 30s)
+  - Key: SHA-256(subject_token, audience)
+  - Avoids repeated exchanges for same user→tool
+  - Latency: cached=<1ms, uncached=50-100ms
+
+**Bypass Paths**:
+- Health checks: `/healthz`, `/readyz`, `/livez`
+- Public metadata: `/.well-known/*`
+- Configurable via `BYPASS_INBOUND_PATHS` env var
+- Only applies when **no Authorization header** present
+
+### Configuration
+
+All configuration via environment variables:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `KEYCLOAK_URL` | `http://keycloak-service.keycloak.svc:8080` | Internal URL for JWKS and token exchange API |
+| `ISSUER_URL` | (same as KEYCLOAK_URL) | External issuer for JWT validation |
+| `REALM` | `kagenti` | Keycloak realm |
+| `CLIENT_ID` | `token-exchange-service` | Service's Keycloak client ID |
+| `CLIENT_SECRET` | **(required)** | Service's Keycloak client secret |
+| `LISTEN_ADDR` | `:9090` | gRPC ext_authz listen address |
+| `PROXY_LISTEN_ADDR` | (disabled) | HTTP proxy listen address |
+| `BYPASS_INBOUND_PATHS` | `/.well-known/*,/healthz,/readyz,/livez` | Comma-separated bypass patterns |
+
+**Critical: ISSUER_URL**
+
+The `ISSUER_URL` must **exactly match** the `iss` claim in tokens:
+- Tokens from port-forward: `http://localhost:18080/realms/kagenti`
+- Tokens from ROSA route: `https://keycloak-keycloak.apps.rosa.../realms/kagenti`
+
+Mismatch causes: `"invalid issuer: got X, want Y"` errors.
+
+On OpenShift, `make up` automatically sets:
+```bash
+kubectl set env deployment/token-exchange-service -n kagenti-system \
+  ISSUER_URL=https://keycloak-keycloak.apps.rosa.akram.dxp0.p3.openshiftapps.com
+```
+
+### Error Messages
+
+The service returns **specific error messages** for debugging:
+
+| Error | Code | When |
+|-------|------|------|
+| `no Authorization header` | 401 | Missing header on protected path |
+| `token is malformed: ...` | 401 | Invalid JWT structure |
+| `invalid token: ...` | 401 | Signature verification failed |
+| `token expired` | 401 | JWT `exp` in the past |
+| `invalid issuer: got X, want Y` | 401 | Issuer mismatch |
+| `token exchange failed: ...` | 403 | Keycloak rejected exchange |
+
+These errors propagate through demo-agent:
+```json
+{
+  "tool_status": 401,
+  "tool_response_raw": {
+    "error": "invalid token: token is expired"
+  }
+}
+```
+
+### Performance Characteristics
+
+| Scenario | Latency | Notes |
+|----------|---------|-------|
+| Token cache HIT | <1ms | In-memory lookup |
+| Token cache MISS | 50-100ms | Keycloak exchange call |
+| JWKS cache MISS | +10-20ms | Fetch public keys |
+| Cold start | 100-150ms | Both caches empty |
+
+**Throughput**: Handles thousands of concurrent requests (limited by Keycloak, not the service).
+
+### Full Documentation
+
+See [cmd/token-exchange-service/README.md](cmd/token-exchange-service/README.md) for:
+- Complete architecture diagrams
+- Detailed caching strategy
+- Token exchange flow walkthrough
+- Troubleshooting guide
+- Security considerations
+- Future enhancements
+
 ## Waypoint Placement
 
 Istio waypoints are **strictly destination-side** — they intercept traffic going TO services in their namespace, never outbound FROM them. This was validated during the PoC: a workload-level waypoint (`waypoint-for: workload` or `all`) in agent-ns does not see outbound calls to tools in other namespaces.
@@ -536,7 +710,7 @@ make test
 | `demo-agent` | `cmd/demo-agent/` | Receives a user token, forwards it to echo-tool or time-tool |
 | `echo-tool` | `cmd/echo-tool/` | Echoes request headers as JSON — verifies the exchanged token |
 | `time-tool` | `cmd/time-tool/` | Returns current time + JWT claims — second tool for multi-tool demo |
-| `token-exchange-service` | `cmd/token-exchange-service/` | Shared service: JWT validation + RFC 8693 token exchange. Dual interface: gRPC ext_authz (waypoint) + HTTP forward proxy (HTTP_PROXY) |
+| `token-exchange-service` | [`cmd/token-exchange-service/`](cmd/token-exchange-service/) | **Core service**: JWT validation + RFC 8693 token exchange. Dual interface: gRPC ext_authz (waypoint) + HTTP forward proxy (HTTP_PROXY). [Full documentation →](cmd/token-exchange-service/README.md) |
 
 ## Demo Scripts
 
