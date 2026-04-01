@@ -214,8 +214,9 @@ retry_kubectl kubectl label ns "$TEAM2_NS" \
 
 detail "Namespaces created with ambient mesh labels"
 
-# Create authbridge-config, keycloak-admin-secret, and sidecar ConfigMaps for both namespaces
-info "Creating configuration for operator and webhook-injected sidecars..."
+# Create authbridge-config and keycloak-admin-secret for operator
+# Note: Sidecar injection is disabled via kagenti.io/inject="false" label
+info "Creating configuration for operator-managed client registration..."
 
 for NS in "$TEAM1_NS" "$TEAM2_NS"; do
   retry_kubectl kubectl create configmap authbridge-config -n "$NS" \
@@ -233,32 +234,9 @@ for NS in "$TEAM1_NS" "$TEAM2_NS"; do
     --dry-run=client -o yaml | kubectl apply -f - || true
 
   sleep 2
-
-  # Create spiffe-helper-config ConfigMap (required by spiffe-helper sidecar)
-  retry_kubectl kubectl create configmap spiffe-helper-config -n "$NS" \
-    --from-literal=helper.conf='agent_address = "/spiffe-workload-api/spire-agent.sock"
-cmd = ""
-cmd_args = ""
-cert_dir = "/opt"
-renew_signal = ""
-svid_file_name = "svid.pem"
-svid_key_file_name = "svid_key.pem"
-svid_bundle_file_name = "svid_bundle.pem"
-jwt_svids = [{jwt_audience="kagenti", jwt_svid_file_name="jwt_svid.token"}]' \
-    --dry-run=client -o yaml | kubectl apply -f - || true
-
-  sleep 2
-
-  # Create envoy-config ConfigMap (required by envoy-proxy sidecar)
-  # Using minimal configuration file for this test
-  retry_kubectl kubectl create configmap envoy-config -n "$NS" \
-    --from-file=envoy.yaml=deploy/minimal-envoy-config.yaml \
-    --dry-run=client -o yaml | kubectl apply -f - || true
-
-  sleep 2
 done
 
-detail "Configuration and admin secrets created in both namespaces"
+detail "Operator configuration created in both namespaces (sidecar injection disabled)"
 
 # Deploy waypoints in both namespaces
 info "Deploying waypoints for team1 and team2..."
@@ -377,6 +355,7 @@ spec:
       labels:
         app: team1-agent
         kagenti.io/type: agent
+        kagenti.io/inject: "false"
     spec:
       serviceAccountName: team1-agent
       containers:
@@ -449,6 +428,7 @@ spec:
       labels:
         app: team2-agent
         kagenti.io/type: agent
+        kagenti.io/inject: "false"
     spec:
       serviceAccountName: team2-agent
       containers:
@@ -841,15 +821,15 @@ if [[ "$SKIP_CLEANUP" == "true" ]]; then
   info "The test resources are still running. Here's what to verify:"
   echo ""
 
-  detail "1. Check if webhook injected sidecars into pods:"
+  detail "1. Verify sidecar injection is disabled (should show only 1 container):"
   detail "   kubectl get pods -n $TEAM1_NS -o jsonpath='{.items[*].spec.containers[*].name}'"
   detail "   kubectl get pods -n $TEAM2_NS -o jsonpath='{.items[*].spec.containers[*].name}'"
-  detail "   Expected: Should show multiple containers if webhook injected sidecars"
+  detail "   Expected: Should show only 'agent' (sidecar injection disabled via label)"
   echo ""
 
-  detail "2. Verify operator-provisioned credentials are mounted:"
-  detail "   kubectl exec -n $TEAM1_NS deploy/team1-agent -- ls -la /shared/ 2>/dev/null || echo 'No /shared mount'"
-  detail "   Expected: Should see client-id.txt and client-secret.txt if webhook mounted them"
+  detail "2. Verify operator created credentials secrets (not mounted, since sidecars disabled):"
+  detail "   kubectl get secret -n $TEAM1_NS -o name | grep kagenti-keycloak"
+  detail "   Expected: Should see operator-created secret"
   echo ""
 
   detail "3. Check pod volumes (should include operator secret):"
@@ -882,13 +862,15 @@ if [[ "$SKIP_CLEANUP" == "true" ]]; then
   detail "     -d \"grant_type=client_credentials\" -d \"client_id=\$CLIENT_ID\" -d \"client_secret=\$CLIENT_SECRET\""
   echo ""
 
-  info "Summary of what the operator + webhook did:"
+  info "Summary of what the operator did (webhook injection disabled):"
   detail "✓ Operator detected deployments with label 'kagenti.io/type: agent'"
   detail "✓ Operator created Keycloak clients (team1/team1-agent, team2/team2-agent)"
   detail "✓ Operator provisioned credential Secrets with ownership references"
   detail "✓ Operator annotated pod templates with secret names"
-  detail "✓ Webhook (should have) injected sidecars and mounted credentials"
+  detail "✓ Webhook injection disabled via 'kagenti.io/inject: false' label"
   detail "✓ Waypoints configured for token exchange"
+  detail ""
+  detail "Note: Pods run with single container (no sidecars) for this test"
   echo ""
 fi
 
