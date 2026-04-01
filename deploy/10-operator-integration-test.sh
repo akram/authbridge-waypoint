@@ -313,6 +313,147 @@ EOF
 detail "Waypoints deployed"
 sleep 2
 
+# ==========================================================================
+# Validate waypoint requirements (prevent common misconfigurations)
+# ==========================================================================
+
+section "Validating Waypoint Requirements"
+
+info "Checking namespace labels (required for waypoint provisioning)..."
+
+# Check team1 namespace labels
+TEAM1_DISCOVERY_LABEL=$(kubectl get ns "$TEAM1_NS" -o jsonpath='{.metadata.labels.istio-discovery}' 2>/dev/null || echo "")
+if [[ "$TEAM1_DISCOVERY_LABEL" != "enabled" ]]; then
+  echo ""
+  fail "CRITICAL: team1 namespace missing required label: istio-discovery=enabled"
+  detail "Without this label, istiod will NOT watch the namespace and gateways will remain PROGRAMMED=Unknown"
+  detail "Fix: kubectl label ns $TEAM1_NS istio-discovery=enabled"
+  exit 1
+fi
+ok "team1 namespace has istio-discovery=enabled label"
+
+# Check team2 namespace labels
+TEAM2_DISCOVERY_LABEL=$(kubectl get ns "$TEAM2_NS" -o jsonpath='{.metadata.labels.istio-discovery}' 2>/dev/null || echo "")
+if [[ "$TEAM2_DISCOVERY_LABEL" != "enabled" ]]; then
+  echo ""
+  fail "CRITICAL: team2 namespace missing required label: istio-discovery=enabled"
+  detail "Without this label, istiod will NOT watch the namespace and gateways will remain PROGRAMMED=Unknown"
+  detail "Fix: kubectl label ns $TEAM2_NS istio-discovery=enabled"
+  exit 1
+fi
+ok "team2 namespace has istio-discovery=enabled label"
+
+info "Checking gateway labels (required for waypoint creation)..."
+
+# Check team1 gateway labels
+TEAM1_WAYPOINT_FOR=$(kubectl get gateway team1-waypoint -n "$TEAM1_NS" -o jsonpath='{.metadata.labels.istio\.io/waypoint-for}' 2>/dev/null || echo "")
+if [[ -z "$TEAM1_WAYPOINT_FOR" ]]; then
+  echo ""
+  fail "CRITICAL: team1-waypoint missing required label: istio.io/waypoint-for"
+  detail "Without this label, Istio controller will NOT program the gateway"
+  detail "Fix: kubectl label gateway team1-waypoint -n $TEAM1_NS istio.io/waypoint-for=all"
+  exit 1
+fi
+ok "team1-waypoint has istio.io/waypoint-for=$TEAM1_WAYPOINT_FOR label"
+
+# Check team2 gateway labels
+TEAM2_WAYPOINT_FOR=$(kubectl get gateway team2-waypoint -n "$TEAM2_NS" -o jsonpath='{.metadata.labels.istio\.io/waypoint-for}' 2>/dev/null || echo "")
+if [[ -z "$TEAM2_WAYPOINT_FOR" ]]; then
+  echo ""
+  fail "CRITICAL: team2-waypoint missing required label: istio.io/waypoint-for"
+  detail "Without this label, Istio controller will NOT program the gateway"
+  detail "Fix: kubectl label gateway team2-waypoint -n $TEAM2_NS istio.io/waypoint-for=all"
+  exit 1
+fi
+ok "team2-waypoint has istio.io/waypoint-for=$TEAM2_WAYPOINT_FOR label"
+
+info "Waiting for waypoint gateways to become PROGRAMMED (max 60s)..."
+
+# Wait for team1 waypoint to be programmed
+TIMEOUT=60
+ELAPSED=0
+while [[ $ELAPSED -lt $TIMEOUT ]]; do
+  TEAM1_PROGRAMMED=$(kubectl get gateway team1-waypoint -n "$TEAM1_NS" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || echo "Unknown")
+  if [[ "$TEAM1_PROGRAMMED" == "True" ]]; then
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+if [[ "$TEAM1_PROGRAMMED" != "True" ]]; then
+  echo ""
+  fail "CRITICAL: team1-waypoint gateway did not become PROGRAMMED within ${TIMEOUT}s"
+  detail "Current status: PROGRAMMED=$TEAM1_PROGRAMMED"
+  detail ""
+  detail "Common causes:"
+  detail "  1. ztunnel not running (check: kubectl get pods -n istio-ztunnel)"
+  detail "  2. Missing istio-discovery=enabled label on namespace"
+  detail "  3. Missing istio.io/waypoint-for label on gateway"
+  detail "  4. Istio ambient mesh not properly configured"
+  detail ""
+  detail "Debug commands:"
+  detail "  kubectl describe gateway team1-waypoint -n $TEAM1_NS"
+  detail "  kubectl logs -n istio-system deployment/istiod | grep -i team1"
+  exit 1
+fi
+
+TEAM1_ADDRESS=$(kubectl get gateway team1-waypoint -n "$TEAM1_NS" -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "")
+ok "team1-waypoint is PROGRAMMED (ADDRESS: $TEAM1_ADDRESS)"
+
+# Wait for team2 waypoint to be programmed
+ELAPSED=0
+while [[ $ELAPSED -lt $TIMEOUT ]]; do
+  TEAM2_PROGRAMMED=$(kubectl get gateway team2-waypoint -n "$TEAM2_NS" -o jsonpath='{.status.conditions[?(@.type=="Programmed")].status}' 2>/dev/null || echo "Unknown")
+  if [[ "$TEAM2_PROGRAMMED" == "True" ]]; then
+    break
+  fi
+  sleep 2
+  ELAPSED=$((ELAPSED + 2))
+done
+
+if [[ "$TEAM2_PROGRAMMED" != "True" ]]; then
+  echo ""
+  fail "CRITICAL: team2-waypoint gateway did not become PROGRAMMED within ${TIMEOUT}s"
+  detail "Current status: PROGRAMMED=$TEAM2_PROGRAMMED"
+  detail ""
+  detail "Common causes:"
+  detail "  1. ztunnel not running (check: kubectl get pods -n istio-ztunnel)"
+  detail "  2. Missing istio-discovery=enabled label on namespace"
+  detail "  3. Missing istio.io/waypoint-for label on gateway"
+  detail "  4. Istio ambient mesh not properly configured"
+  detail ""
+  detail "Debug commands:"
+  detail "  kubectl describe gateway team2-waypoint -n $TEAM2_NS"
+  detail "  kubectl logs -n istio-system deployment/istiod | grep -i team2"
+  exit 1
+fi
+
+TEAM2_ADDRESS=$(kubectl get gateway team2-waypoint -n "$TEAM2_NS" -o jsonpath='{.status.addresses[0].value}' 2>/dev/null || echo "")
+ok "team2-waypoint is PROGRAMMED (ADDRESS: $TEAM2_ADDRESS)"
+
+info "Verifying waypoint pods were created..."
+
+# Check for team1 waypoint pod
+kubectl wait --for=condition=Ready pod -l gateway.networking.k8s.io/gateway-name=team1-waypoint -n "$TEAM1_NS" --timeout=30s 2>/dev/null || {
+  echo ""
+  fail "CRITICAL: team1-waypoint pod not created or not ready"
+  detail "Gateway is PROGRAMMED but pod not found"
+  detail "Debug: kubectl get pods -n $TEAM1_NS -l gateway.networking.k8s.io/gateway-name=team1-waypoint"
+  exit 1
+}
+ok "team1-waypoint pod is ready"
+
+# Check for team2 waypoint pod
+kubectl wait --for=condition=Ready pod -l gateway.networking.k8s.io/gateway-name=team2-waypoint -n "$TEAM2_NS" --timeout=30s 2>/dev/null || {
+  echo ""
+  fail "CRITICAL: team2-waypoint pod not created or not ready"
+  detail "Gateway is PROGRAMMED but pod not found"
+  detail "Debug: kubectl get pods -n $TEAM2_NS -l gateway.networking.k8s.io/gateway-name=team2-waypoint"
+  exit 1
+}
+ok "team2-waypoint pod is ready"
+
 # Configure AuthorizationPolicy for both waypoints
 info "Configuring AuthorizationPolicy for token exchange..."
 

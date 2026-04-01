@@ -10,6 +10,22 @@ The test (`deploy/10-operator-integration-test.sh`) validates the complete integ
 2. **Operator-managed client registration** — Automatic Keycloak client creation and credential provisioning
 3. **Multi-team agent communication** — Secure cross-namespace communication with automatic credential management
 
+## ⚠️ Critical Requirements
+
+**IMPORTANT**: For waypoint gateways to be provisioned correctly, two specific labels are REQUIRED:
+
+1. **Namespace label**: `istio-discovery=enabled`
+   - Without this, istiod will NOT watch the namespace
+   - Symptom: Gateway stuck in `PROGRAMMED: Unknown`
+
+2. **Gateway label**: `istio.io/waypoint-for=all`
+   - Without this, Istio controller will NOT program the gateway
+   - Symptom: Gateway never gets an ADDRESS assigned
+
+**The test script automatically validates these requirements and fails with clear error messages if they are missing.**
+
+📖 **See [REQUIRED_LABELS.md](./REQUIRED_LABELS.md) for complete documentation and troubleshooting.**
+
 ## Architecture
 
 The test creates two team namespaces with the following setup:
@@ -182,11 +198,32 @@ The test performs the following steps:
 
 ### 1. Setup Phase
 
-1. Creates `team1` and `team2` namespaces with ambient mesh labels
+1. Creates `team1` and `team2` namespaces with ambient mesh labels (including `istio-discovery=enabled`)
 2. Configures `authbridge-config` and `keycloak-admin-secret` in both namespaces
-3. Deploys waypoint gateways for each team
-4. Configures AuthorizationPolicy for token exchange
-5. Deploys agent workloads in each namespace
+3. Deploys waypoint gateways for each team (with `istio.io/waypoint-for=all` label)
+4. **Validates waypoint requirements** (new validation phase)
+5. Configures AuthorizationPolicy for token exchange
+6. Deploys agent workloads in each namespace
+
+### 1a. Waypoint Requirements Validation ⚠️
+
+**This critical validation phase prevents common misconfigurations:**
+
+1. **Namespace Label Check**: Verifies `istio-discovery=enabled` is present on both namespaces
+   - Fails immediately if missing with clear fix command
+
+2. **Gateway Label Check**: Verifies `istio.io/waypoint-for` is present on both gateways
+   - Fails immediately if missing with clear fix command
+
+3. **Gateway Programming Wait**: Waits up to 60s for gateways to become `PROGRAMMED: True`
+   - Fails with diagnostic information if timeout occurs
+   - Shows common causes and debug commands
+
+4. **Waypoint Pod Check**: Verifies waypoint pods are created and ready
+   - Fails if pods don't appear within 30s
+   - Provides debug commands for investigation
+
+**If validation fails, the test exits with exit code 1 and a clear error message explaining exactly what's missing and how to fix it.**
 
 ### 2. Operator Registration Test
 
