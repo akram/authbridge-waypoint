@@ -363,10 +363,15 @@ sleep 2
 # Deploy team1-agent
 info "Deploying team1-agent..."
 
-# Set inject label based on ENABLE_SIDECAR
+# Set inject labels based on ENABLE_SIDECAR
 INJECT_LABEL="false"
+ENVOY_PROXY_INJECT="false"
+SPIFFE_HELPER_INJECT="false"
+
 if [[ "$ENABLE_SIDECAR" == "true" ]]; then
   INJECT_LABEL="true"
+  ENVOY_PROXY_INJECT="true"
+  SPIFFE_HELPER_INJECT="true"
 fi
 
 retry_kubectl kubectl apply --validate=false -f - <<EOF
@@ -398,6 +403,8 @@ spec:
         app: team1-agent
         kagenti.io/type: agent
         kagenti.io/inject: "$INJECT_LABEL"
+        kagenti.io/envoy-proxy-inject: "$ENVOY_PROXY_INJECT"
+        kagenti.io/spiffe-helper-inject: "$SPIFFE_HELPER_INJECT"
     spec:
       serviceAccountName: team1-agent
       containers:
@@ -471,6 +478,8 @@ spec:
         app: team2-agent
         kagenti.io/type: agent
         kagenti.io/inject: "$INJECT_LABEL"
+        kagenti.io/envoy-proxy-inject: "$ENVOY_PROXY_INJECT"
+        kagenti.io/spiffe-helper-inject: "$SPIFFE_HELPER_INJECT"
     spec:
       serviceAccountName: team2-agent
       containers:
